@@ -117,11 +117,48 @@ function AuthPage() {
     }
   };
 
-  const handleGoogleLogin = () => {
-    if (typeof window !== 'undefined') {
-      setIsLoading(true);
-      // Redirect to backend Google OAuth endpoint
-      window.location.href = "http://localhost:5000/api/auth/google";
+  const handleGoogleLogin = async () => {
+    // Initialize Google One-Tap
+    if (typeof window !== 'undefined' && (window as any).google) {
+      try {
+        const google = (window as any).google;
+        google.accounts.id.initialize({
+          client_id: "608687632539-2o6insdcvhdb2i1bvq6k6mcqart8rfq3.apps.googleusercontent.com",
+          callback: async (response: any) => {
+            setIsLoading(true);
+            try {
+              const res = await fetch("http://localhost:5000/api/auth/google", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                  id_token: response.credential,
+                  role: "client" 
+                }),
+              });
+
+              const data = await res.json();
+
+              if (res.ok) {
+                localStorage.setItem("token", data.token);
+                localStorage.setItem("user", JSON.stringify(data.user));
+                toast.success("Google login successful!");
+                navigate({ to: "/dashboard" });
+              } else {
+                toast.error(data.detail || "Google login failed");
+              }
+            } catch (error) {
+              toast.error("Connection error. Please try again.");
+            } finally {
+              setIsLoading(false);
+            }
+          },
+        });
+        google.accounts.id.prompt();
+      } catch (error) {
+        toast.error("Google Sign-In not available. Please use email/password.");
+      }
+    } else {
+      toast.error("Google Sign-In not loaded. Please refresh and try again.");
     }
   };
 

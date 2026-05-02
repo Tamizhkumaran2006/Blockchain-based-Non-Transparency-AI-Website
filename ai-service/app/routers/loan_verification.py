@@ -14,30 +14,11 @@ from sqlalchemy import select
 
 from app.config.database import UserModel, LoanVerificationModel, async_session_maker
 from app.ocr.document_verifier import document_verifier
-from standalone_auth import get_current_user
+from app.ocr.extractor import extract_text_from_file
+from app.services.token_service import get_current_user
 
 logger = logging.getLogger("verity-ai.loan")
 router = APIRouter()
-
-# Mock OCR function (replace with actual Google Vision API)
-def perform_ocr(file_path: str) -> str:
-    """
-    Perform OCR on uploaded document
-    In production, use Google Cloud Vision API
-    """
-    # Mock OCR result for testing
-    return """
-    INCOME CERTIFICATE
-    
-    This is to certify that Mr./Ms. [Name]
-    is employed with [Company Name]
-    
-    Monthly Salary: Rs. 45,000
-    Annual Income: Rs. 5,40,000
-    
-    Issued on: [Date]
-    Authorized Signatory
-    """
 
 
 class LoanApplicationResponse(BaseModel):
@@ -61,15 +42,16 @@ async def apply_for_loan(
     
     Process:
     1. Upload income certificate
-    2. Perform OCR to extract salary
+    2. Perform OCR using Google Cloud Vision API to extract salary
     3. Verify eligibility (salary vs loan amount)
     4. Create zero-knowledge proof (no salary exposure)
-    5. Store on blockchain for immutability
-    6. Send to manager for approval
+    5. Store verification hash on blockchain for immutability
+    6. Send to manager for approval if eligible
     """
     try:
         # Validate file type
-        if not income_certificate.content_type in ["application/pdf", "image/jpeg", "image/png"]:
+        allowed_types = ["application/pdf", "image/jpeg", "image/png", "image/jpg"]
+        if income_certificate.content_type not in allowed_types:
             raise HTTPException(
                 status_code=400,
                 detail="Only PDF, JPEG, and PNG files are allowed"
@@ -83,48 +65,85 @@ async def apply_for_loan(
         file_name = f"{uuid.uuid4()}.{file_extension}"
         file_path = os.path.join(upload_dir, file_name)
         
+        # Read file content
+        file_content = await income_certificate.read()
+        
+        # Save to disk
         with open(file_path, "wb") as f:
-            content = await income_certificate.read()
-            f.write(content)
+            f.write(file_content)
         
         logger.info(f"File uploaded: {file_name}")
         
-        # Perform OCR
-        ocr_text = perform_ocr(file_path)
+        # Perform OCR using Google Cloud Vision API
+        try:
+            ocr_result = await extract_text_from_file(
+                file_content,
+                income_certificate.content_type,
+                income_certificate.filename
+            )
+            ocr_text = ocr_result["text"]
+            ocr_confidence = ocr_result.get("confidence", 0.0)
+            
+            logger.info(f"OCR completed with {ocr_confidence:.2%} confidence")
+            
+            if not ocr_text or len(ocr_text.strip()) < 10:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract text from document. Please ensure the image is clear and readable."
+                )
+        except Exception as e:
+            logger.error(f"OCR failed: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to process document: {str(e)}"
+            )
         
         # Verify document authenticity
         is_authentic, auth_message = document_verifier.verify_document_authenticity(ocr_text)
         if not is_authentic:
             raise HTTPException(status_code=400, detail=auth_message)
         
-        # Extract salary
+        logger.info(f"Document authenticity verified: {auth_message}")
+        
+        # Extract salary using AI pattern matching
         salary = document_verifier.extract_salary_from_text(ocr_text)
         if not salary:
             raise HTTPException(
                 status_code=400,
-                detail="Could not extract salary from document. Please ensure it's a valid income certificate."
+                detail="Could not extract salary from document. Please ensure it's a valid income certificate with clearly visible salary information."
             )
         
-        # Verify eligibility
+        logger.info(f"Extracted salary: ₹{salary}")
+        
+        # Verify eligibility based on bank's rules
         is_eligible, reason, details = document_verifier.verify_eligibility(
             salary, loan_amount, loan_type
         )
+        
+        logger.info(f"Eligibility check: {is_eligible} - {reason}")
         
         # Create zero-knowledge proof (salary not exposed)
         zkp_proof = document_verifier.create_zero_knowledge_proof(
             salary, loan_amount, loan_type
         )
         
-        # Create verification hash for blockchain
+        # Create verification data for blockchain
         verification_data = {
             "user_id": current_user.id,
+            "user_email": current_user.email,
             "loan_type": loan_type,
             "loan_amount": loan_amount,
             "is_eligible": is_eligible,
             "verified_at": datetime.utcnow().isoformat(),
-            "salary_commitment": zkp_proof["salary_commitment"]
+            "salary_commitment": zkp_proof["salary_commitment"],  # Hash only, not actual salary
+            "document_verified": is_authentic,
+            "ocr_confidence": ocr_confidence
         }
+        
+        # Create blockchain hash for immutable audit trail
         blockchain_hash = document_verifier.create_verification_hash(verification_data)
+        
+        logger.info(f"Blockchain hash created: {blockchain_hash[:16]}...")
         
         # Determine initial status
         if is_eligible:
@@ -149,9 +168,11 @@ async def apply_for_loan(
                 extracted_data={
                     "loan_type": loan_type,
                     "loan_amount": loan_amount,
-                    "ocr_text": ocr_text[:500],  # Store first 500 chars
+                    "ocr_text": ocr_text[:500],  # Store first 500 chars for reference
+                    "ocr_confidence": ocr_confidence,
                     "document_verified": is_authentic,
-                    # DO NOT store actual salary for privacy
+                    "auth_message": auth_message,
+                    # IMPORTANT: Actual salary is NOT stored for privacy
                 },
                 ai_decision={
                     "is_eligible": is_eligible,
@@ -161,7 +182,9 @@ async def apply_for_loan(
                     "details": {
                         "max_eligible_loan": details.get("max_eligible_loan"),
                         "utilization_percent": details.get("utilization_percent"),
-                        # Salary is NOT stored here
+                        "lti_ratio": details.get("lti_ratio"),
+                        "multiplier": details.get("multiplier"),
+                        # Actual salary is NOT stored here for privacy
                     }
                 },
                 file_name=income_certificate.filename,
@@ -186,7 +209,9 @@ async def apply_for_loan(
                 "reason": reason,
                 "max_eligible_loan": details.get("max_eligible_loan"),
                 "utilization_percent": details.get("utilization_percent"),
-                # Actual salary is NEVER returned
+                "lti_ratio": details.get("lti_ratio"),
+                "ocr_confidence": ocr_confidence,
+                # Actual salary is NEVER returned for privacy
             },
             blockchain_hash=blockchain_hash
         )
@@ -221,6 +246,11 @@ async def get_my_applications(current_user: UserModel = Depends(get_current_user
                         "reason": app.reason,
                         "loan_type": app.extracted_data.get("loan_type") if app.extracted_data else None,
                         "loan_amount": app.extracted_data.get("loan_amount") if app.extracted_data else None,
+                        "verification_result": {
+                            "is_eligible": app.ai_decision.get("is_eligible") if app.ai_decision else None,
+                            "max_eligible_loan": app.ai_decision.get("details", {}).get("max_eligible_loan") if app.ai_decision else None,
+                            "utilization_percent": app.ai_decision.get("details", {}).get("utilization_percent") if app.ai_decision else None,
+                        } if app.ai_decision else None,
                         "created_at": app.created_at.isoformat() if app.created_at else None,
                         "blockchain_hash": app.ai_decision.get("blockchain_hash") if app.ai_decision else None
                     }

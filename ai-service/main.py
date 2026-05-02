@@ -27,7 +27,7 @@ load_dotenv()
 from app.config.sqlite_db import init_db
 from app.config.logger import get_logger
 from app.config.settings import settings
-from app.routers import auth, upload, verify, manager, history, health, zkp, eligibility, websocket
+from app.routers import auth, upload, verify, manager, history, health, zkp, eligibility, websocket, loan_verification
 from app.middleware.monitoring import MonitoringMiddleware
 from prometheus_client import make_asgi_app
 
@@ -78,6 +78,7 @@ app.include_router(upload.router,   prefix="/api/upload",   tags=["Upload"])
 app.include_router(verify.router,   prefix="/api/verify",   tags=["Verify"])
 app.include_router(zkp.router,      prefix="/api/zkp",      tags=["ZKP"])
 app.include_router(eligibility.router, prefix="/api/eligibility", tags=["Eligibility"])
+app.include_router(loan_verification.router, prefix="/api/loans", tags=["Loans"])
 app.include_router(manager.router,  prefix="/api/manager",  tags=["Manager"])
 app.include_router(history.router,  prefix="/api/history",  tags=["History"])
 app.include_router(websocket.router, prefix="/api",         tags=["WebSocket"])
