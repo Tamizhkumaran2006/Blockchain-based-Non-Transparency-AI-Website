@@ -13,7 +13,7 @@
 
 ```
 verity-ai-main/
-├── backend/                    ← Node.js Express Backend
+├── backend/                    ← Node.js Express Backend tamizh github check
 │   ├── server.js               ← Entry point
 │   ├── .env                    ← Environment variables
 │   ├── src/
